@@ -1,0 +1,117 @@
+:root {font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; color:#000; background:#fff; font-size:17px; --tint:#007aff; color-scheme:light}
+* {box-sizing:border-box}
+body {margin:0; min-width:240px}
+#app {padding:0; min-height:100vh; overflow-wrap:anywhere}
+.component, .group, .windowgroup, .navigationstack, .navigationview {display:contents}
+.vstack {display:flex; flex-direction:column; align-items:center; gap:8px}
+.hstack {display:flex; flex-direction:row; align-items:center; gap:8px}
+.zstack {display:grid; align-items:center; justify-items:center}
+.zstack > * {grid-area:1 / 1}
+.scrollview {overflow-y:auto; max-height:80vh; max-width:100%; align-self:stretch}
+.scrollview.horizontal {overflow-x:auto}
+.text {white-space:pre-wrap; overflow-wrap:break-word; word-break:normal}
+.image {max-width:100%; object-fit:contain; vertical-align:middle}
+.image-missing {display:flex; align-items:center; justify-content:center; min-width:28px; min-height:28px; width:100%; height:100%; box-sizing:border-box; border:1px dashed #b54708; border-radius:5px; background:#fffaeb; color:#853b0c; font-size:14px; font-weight:600}
+.circle {display:block; flex:none; aspect-ratio:1; border-radius:50%; background:currentColor}
+.groupbox {display:block; max-width:100%; padding:10px; border:1px solid #d1d5db; border-radius:10px; background:#f8f8fa}
+.groupbox-label {margin-bottom:8px; font-weight:600}
+.form-view {display:flex; flex-direction:column; align-items:stretch; gap:12px; max-width:100%}
+.form-section {display:flex; flex-direction:column; gap:7px; max-width:100%}
+.form-section-header {font-size:13px; color:#636366; padding:0 14px; text-transform:uppercase; letter-spacing:.02em}
+.form-section-body {padding:10px 14px; border-radius:10px; background:#fff; display:flex; flex-direction:column; align-items:stretch; gap:12px}
+.form-section-footer {font-size:13px; color:#636366; padding:0 14px}
+.labeled-content {display:flex; align-items:center; justify-content:space-between; gap:12px; min-height:38px}
+.labeled-content-label {color:#000}
+.labeled-content-value {color:#636366; text-align:end}
+.date-picker-control {display:flex; align-items:center; justify-content:space-between; gap:12px; min-height:44px}
+.date-picker {font:inherit; border:1px solid #d1d1d6; border-radius:8px; padding:6px 8px; background:#f2f2f7; max-width:65%}
+.lazy-grid {display:flex; flex-wrap:wrap; align-items:center; gap:8px; max-width:100%}
+.lazy-vgrid > * {flex:1 1 95px; min-width:80px}
+.lazy-hgrid {flex-direction:column}
+.navigation-stack {display:block; min-width:0; width:100%}
+.picker-control {display:flex; align-items:center; gap:12px; justify-content:space-between; min-height:44px; max-width:100%}
+.picker-control select {font:inherit; color:var(--tint); border:1px solid #d1d1d6; border-radius:9px; background:#f2f2f7; padding:7px 10px; max-width:65%}
+.picker-style-segmented select {border-radius:10px; background:#e5e5ea; padding:3px; border:0}
+.stepper {display:flex; align-items:center; gap:8px; min-height:40px; max-width:100%}
+.stepper-label {flex:1; min-width:0}
+.stepper-button {border:0; border-radius:50%; background:#e5e5ea; width:30px; height:30px; padding:0; color:var(--tint); font-size:20px; line-height:1}
+.label-view {display:inline-flex; align-items:center; gap:7px}
+.system-symbol {display:inline-flex; align-items:center; justify-content:center; min-width:1em; min-height:1em; font-size:1.15em; line-height:1}
+.text-field-style-roundedBorder {border:1px solid #c7c7cc; border-radius:8px; padding:8px 10px; background:#fff}
+.button-style-plain {color:inherit}
+.button-style-borderless {background:transparent}
+.button-style-borderless:hover, .picker-control select:hover {filter:brightness(.97)}
+.button.destructive, .confirmation-panel .button.destructive {color:#ff3b30}
+.presentation-host {position:relative; min-width:0}
+.sheet-overlay, .dialog-overlay {position:fixed; z-index:1000; inset:0; display:flex; align-items:flex-end; justify-content:center; background:#0006; animation:swiftui-content-enter 160ms ease both}
+.sheet-panel, .confirmation-panel {position:relative; width:min(100%, 680px); max-height:min(88vh, 900px); overflow:auto; background:#f2f2f7; border-radius:18px 18px 0 0; padding:26px 18px calc(20px + env(safe-area-inset-bottom, 0px)); box-shadow:0 -8px 32px #0002}
+.dialog-overlay {align-items:center; padding:20px}
+.confirmation-panel {width:min(100%, 420px); border-radius:14px; padding:28px 20px 16px; text-align:center}
+.sheet-close {position:absolute; z-index:2; top:8px; right:12px; width:36px; height:36px; border:0; border-radius:50%; background:#e5e5ea; font-size:24px; line-height:1; color:#606067}
+.confirmation-title {font-size:18px; margin:0 0 8px}
+.confirmation-message {color:#636366; margin-bottom:16px}
+.confirmation-buttons {display:flex; flex-direction:column; align-items:stretch; border-radius:10px; overflow:hidden; background:#fff}
+.confirmation-buttons > * {min-height:46px; border-bottom:1px solid #e5e5ea; display:flex; align-items:center; justify-content:center}
+.confirmation-buttons > *:last-child {border-bottom:0}
+.content-unavailable {display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; min-height:40vh; padding:32px; color:#8e8e93; text-align:center}
+.content-unavailable-symbol {font-size:42px}
+.content-unavailable-title {font-size:17px; color:#636366}
+.list {display:block; margin:0; padding:0; list-style:none; background:#f2f2f7; border-radius:10px; overflow:hidden}
+.list-row {display:block; min-height:44px; padding:10px 16px; background:#fff; border-bottom:1px solid #d1d1d6}
+.list-row:last-child {border-bottom:0}
+.list-style-plain {border-radius:0; background:transparent}
+.list-style-plain .list-row {padding-inline:0}
+.list-style-grouped {padding:10px; border-radius:12px}
+.list-style-insetGrouped {padding:10px; border-radius:12px}
+.toolbar-host {display:flex; flex-direction:column; align-items:stretch; width:100%; min-width:0}
+.swiftui-toolbar {display:flex; align-items:center; justify-content:flex-end; min-height:44px; padding:0 16px; gap:12px}
+.spacer {flex:1; min-height:8px; min-width:8px}
+.divider {align-self:stretch; border:0; border-top:1px solid #d0d5dd; width:100%; margin:4px 0}
+.hstack > .divider {height:1.5em; width:1px; border-top:0; border-left:1px solid #d0d5dd}
+button, input {font:inherit; color:inherit}
+button {cursor:pointer}
+.button, .navigation-link, .back {transition:transform 140ms ease, opacity 140ms ease}
+.button:active, .navigation-link:active, .back:active {transform:scale(.97)}
+.button, .navigation-link, .back {border:0; border-radius:0; background:transparent; padding:0; color:var(--tint); -webkit-appearance:none; appearance:none}
+.button, .navigation-link {font-size:17px; line-height:1.3; font-weight:400}
+.button:active, .navigation-link:active, .back:active {opacity:.42}
+button:disabled, input:disabled {opacity:.5; cursor:default}
+button:focus-visible, input:focus-visible, summary:focus-visible {outline:3px solid #7db4f0; outline-offset:3px}
+.text-field {border:0; border-radius:0; padding:0; min-width:0; width:100%; max-width:100%; background:transparent; outline:none; caret-color:var(--tint)}
+.toggle {display:flex; align-items:center; justify-content:space-between; gap:12px; cursor:pointer; width:100%; min-height:31px}
+.toggle input {flex:none; -webkit-appearance:none; appearance:none; position:relative; width:62px; height:31px; margin:0; border:0; border-radius:999px; background:#e9e9eb; transition:background-color 120ms ease; cursor:pointer}
+.toggle input::after {content:""; position:absolute; top:2px; left:2px; width:27px; height:27px; border-radius:50%; background:#fff; box-shadow:0 1px 3px #0003; transition:transform 120ms ease}
+.toggle input:checked {background:#34c759}
+.toggle input:checked::after {transform:translateX(31px)}
+.swiftui-toggle-change:checked {animation:swiftui-toggle-on 180ms cubic-bezier(.2,.75,.25,1) both}
+.swiftui-toggle-change:not(:checked) {animation:swiftui-toggle-off 180ms cubic-bezier(.2,.75,.25,1) both}
+.swiftui-toggle-change:checked::after {animation:swiftui-toggle-knob-on 180ms cubic-bezier(.2,.75,.25,1) both}
+.swiftui-toggle-change:not(:checked)::after {animation:swiftui-toggle-knob-off 180ms cubic-bezier(.2,.75,.25,1) both}
+.modifier {display:inline-block; max-width:100%}
+.unsupported {border:1px dashed #b54708; background:#fffaeb; color:#853b0c; padding:10px; font-size:14px; border-radius:4px}
+.navigation-section {width:100%}
+.navigation-title {font-size:34px; line-height:1.1; font-weight:700; letter-spacing:.37px; margin:0 20px 18px}
+.navigation-section {display:flow-root; padding-top:calc(env(safe-area-inset-top, 0px) + 16px)}
+.navigation-page {width:100%; min-height:1px}
+.swiftui-content-enter {animation:swiftui-content-enter 210ms cubic-bezier(.2,.75,.25,1) both}
+.swiftui-value-change {display:inline-block; animation:swiftui-value-change 230ms cubic-bezier(.2,.75,.25,1) both}
+.swiftui-navigation-push {animation:swiftui-navigation-push 260ms cubic-bezier(.2,.75,.25,1) both}
+.swiftui-navigation-pop {animation:swiftui-navigation-pop 240ms cubic-bezier(.2,.75,.25,1) both}
+@keyframes swiftui-content-enter {from {opacity:0; transform:translateY(6px) scale(.99)} to {opacity:1; transform:translateY(0) scale(1)}}
+@keyframes swiftui-value-change {0% {opacity:.45; transform:translateY(3px)} 70% {opacity:1; transform:translateY(-1px)} 100% {opacity:1; transform:translateY(0)}}
+@keyframes swiftui-navigation-push {from {opacity:.6; transform:translateX(20px)} to {opacity:1; transform:translateX(0)}}
+@keyframes swiftui-navigation-pop {from {opacity:.75; transform:translateX(-12px)} to {opacity:1; transform:translateX(0)}}
+@keyframes swiftui-toggle-on {from {background:#e9e9eb} to {background:#34c759}}
+@keyframes swiftui-toggle-off {from {background:#34c759} to {background:#e9e9eb}}
+@keyframes swiftui-toggle-knob-on {from {transform:translateX(0)} to {transform:translateX(31px)}}
+@keyframes swiftui-toggle-knob-off {from {transform:translateX(31px)} to {transform:translateX(0)}}
+.back {display:flex; align-items:center; min-height:44px; margin:0; padding:env(safe-area-inset-top, 0px) 16px 0; font-size:17px; color:var(--tint);}
+#app > .back + .component {display:block}
+#conversion-report {margin:24px; padding:16px; background:#f8fafc; border:1px solid #e4e7ec; border-radius:8px; font-size:13px; line-height:1.6}
+#conversion-report summary {cursor:pointer; font-weight:600}
+.runtime-warning {color:#9a3412}
+#report-items {padding-left:20px}
+@media(max-width:480px) {#app {padding:0} #conversion-report {margin:16px} .hstack {max-width:100%; flex-wrap:wrap}}
+@media(prefers-reduced-motion: reduce) {
+  *, *::before, *::after {animation-duration:.01ms !important; animation-iteration-count:1 !important; scroll-behavior:auto !important; transition-duration:.01ms !important}
+}
