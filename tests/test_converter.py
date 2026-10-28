@@ -324,6 +324,125 @@ func writeFirebase<T: Encodable>(path: String, data: T) throws { }
         self.assertEqual(button["actions"][0]["kind"], "functionCall")
         self.assertEqual(button["actions"][0]["name"], "makeBlankData")
 
+    def test_async_global_firebase_helper_supports_try_await_if_let_and_discarded_response(self):
+        model = self.compile_source('''let databaseURL = "https://demo-default-rtdb.europe-west1.firebasedatabase.app"
+func saveProfile(_ name: String) async throws {
+ if let oldName = try await readFirebase(path: "users/demo/name", as: String.self) {
+  _ = try await firebaseRequest(path: "users/demo/name", method: "PATCH", body: JSONEncoder().encode(name))
+ } else {
+  try await updateFirebase(path: "users/demo/name", method: "PATCH", data: ["name": name])
+ }
+}
+struct Screen: View {
+ var body: some View { Button("Save") { saveProfile("Ada") } }
+}''', "Screen")
+        self.assertEqual(model["diagnostics"], [])
+        self.assertTrue(model["firebase"]["writeEnabled"])
+        function = model["functions"]["saveProfile"]
+        conditional = next(statement for statement in function["body"] if statement["kind"] == "if")
+        self.assertEqual(conditional["bindings"][0]["name"], "oldName")
+        self.assertEqual(conditional["bindings"][0]["value"]["op"], "firebaseCall")
+        write = conditional["yes"][0]["value"]
+        self.assertEqual((write["op"], write["name"]), ("firebaseCall", "firebaseRequest"))
+        button = next(node for node in walk(model["root"]) if node.get("type") == "Button")
+        self.assertEqual(button["actions"][0]["kind"], "functionCall")
+
+    def test_helper_calls_bind_defaulted_middle_arguments_and_forward_globals(self):
+        model = self.compile_source('''import SwiftUI
+@main struct Demo: App { var body: some Scene { WindowGroup { Screen() } } }
+struct Screen: View {
+ var body: some View { Button("Run") { run() } }
+ private func addActivity(to updates: inout [String: Int], type: String, target: String? = nil, details: [String: Int] = [:]) { }
+ private func run() {
+  var updates: [String: Int] = [:]
+  addActivity(to: &updates, type: "investment", details: ["amount": 4])
+  _ = laterValue()
+ }
+}
+func laterValue() -> Int { return 7 }
+''')
+        self.assertEqual(model["diagnostics"], [])
+        run = next(method for key, method in model["componentMethods"].items() if key.endswith(":run"))
+        call = run["body"][1]["value"]
+        self.assertEqual(call["op"], "componentCall")
+        self.assertEqual(call["args"]["target"]["value"], None)
+        self.assertEqual(call["args"]["details"]["op"], "dictionary")
+        later = run["body"][2]["value"]
+        self.assertEqual((later["op"], later["name"]), ("globalCall", "laterValue"))
+
+    def test_do_catch_where_is_emitted_for_runtime_error_filtering(self):
+        model = self.compile_source('''import SwiftUI
+func guardedWrite() async {
+ do { try await updateFirebase(path: "main", method: "PATCH", data: [:]) }
+ catch let error as FirebaseHTTPError where error.statusCode == 412 { return }
+}
+struct Screen: View { var body: some View { Button("Save") { guardedWrite() } } }
+let databaseURL = "https://demo-default-rtdb.europe-west1.firebasedatabase.app"
+''', "Screen")
+        statement = model["functions"]["guardedWrite"]["body"][0]
+        self.assertEqual(statement["kind"], "doCatch")
+        self.assertEqual(statement["catchTest"]["kind"], "==")
+
+    def test_model_closure_initializers_capture_callbacks_and_environment_dismiss(self):
+        model = self.compile_source('''import SwiftUI
+struct SubmitRequest { let title: String; let onSubmit: (Int) async throws -> Void }
+struct Screen: View {
+ @Environment(\\.dismiss) private var dismiss
+ var body: some View { Button("Open") { open() } }
+ private func open() {
+  let id = 7
+  let request = SubmitRequest(title: "Save") { amount in finish(id + amount) }
+ }
+ private func finish(_ value: Int) { dismiss() }
+}''', "Screen")
+        self.assertEqual(model["diagnostics"], [])
+        opened = next(method for key, method in model["componentMethods"].items() if key.endswith(":open"))
+        request = opened["body"][1]["value"]
+        self.assertEqual(request["op"], "construct")
+        callback = next(field["value"] for field in request["fields"] if field["name"] == "onSubmit")
+        self.assertEqual(callback["op"], "closure")
+        self.assertEqual(callback["params"], ["amount"])
+        finish = next(method for key, method in model["componentMethods"].items() if key.endswith(":finish"))
+        self.assertEqual(finish["body"][0]["value"]["op"], "dismissCall")
+
+    def test_remove_all_predicate_and_min_by_helpers_compile(self):
+        model = self.compile_source('''import SwiftUI
+struct Score { let id: Int }
+func removeScore(_ id: Int, from scores: inout [Score]) { scores.removeAll { $0.id == id } }
+func earliest(_ scores: [Score]) -> Score? { return scores.min { $0.id < $1.id } }
+struct Screen: View { var body: some View { Text("Scores") } }
+''', "Screen")
+        self.assertEqual(model["diagnostics"], [])
+        remove = model["functions"]["removeScore"]["body"][0]["value"]
+        self.assertEqual((remove["op"], remove["name"]), ("call", "removeAll"))
+        earliest = model["functions"]["earliest"]["body"][0]["value"]
+        self.assertEqual(earliest["op"], "extremumBy")
+
+    def test_text_editor_is_a_writable_multiline_state_control(self):
+        model = self.compile_source('''import SwiftUI
+struct Screen: View {
+ @State var draft = ""
+ var body: some View { TextEditor(text: $draft).frame(minHeight: 90) }
+}''', "Screen")
+        editor = next(node for node in walk(model["root"]) if node.get("type") == "TextEditor")
+        self.assertEqual(editor["binding"]["key"], "1:draft")
+        self.assertEqual(editor["modifiers"][0]["name"], "frame")
+
+    def test_button_actions_can_branch_on_state_and_write_each_branch(self):
+        model = self.compile_source('''import SwiftUI
+struct Screen: View {
+ @State var selected = false
+ var body: some View {
+  Button(action: { if selected { selected = false } else { selected = true } }, label: { Text("Toggle") })
+ }
+}''', "Screen")
+        button = next(node for node in walk(model["root"]) if node.get("type") == "Button")
+        self.assertEqual(button["actions"][0]["kind"], "program")
+        branch = button["actions"][0]["statements"][0]
+        self.assertEqual(branch["kind"], "if")
+        self.assertEqual(branch["yes"][0]["kind"], "stateAssign")
+        self.assertEqual(branch["no"][0]["kind"], "stateAssign")
+
     def test_nonprimitive_state_with_network_initializer_falls_back_and_is_reported(self):
         model = self.compile_source('''import SwiftUI
 struct Payload { var items: [String] }
@@ -732,6 +851,10 @@ struct Test: View {
             discover(bundle)
 
     def test_cli_success_failure_and_overwrite(self):
+        version = subprocess.run([sys.executable, str(ROOT / "swift_to_web.py"), "--version"],
+                                 capture_output=True, text=True)
+        self.assertEqual(version.returncode, 0)
+        self.assertEqual(version.stdout.strip(), "swift-to-web 2.0.0")
         out = self.root / "app.zip"
         command = [sys.executable, str(ROOT / "swift_to_web.py"), str(FIXTURES / "SwiftDemo"), "--output", str(out)]
         result = subprocess.run(command, capture_output=True, text=True)

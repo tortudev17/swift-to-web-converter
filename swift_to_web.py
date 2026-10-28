@@ -6,9 +6,12 @@ import re
 import sys
 from swiftweb import Compiler, ConversionError, discover, document, write_zip
 
+__version__ = "2.0.0"
+
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--version", action="version", version=f"swift-to-web {__version__}")
     parser.add_argument("project_path", help="Project directory, .xcodeproj, or Package.swift")
     parser.add_argument("--output", "-o", help="Destination .zip (default: <project-name>-web.zip)")
     parser.add_argument("--target", help="Exact Xcode or SwiftPM source target name")

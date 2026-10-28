@@ -123,11 +123,46 @@ def split_top(tokens, delimiter=","):
 def arguments(tokens):
     result = []
     for part in split_top(tokens):
-        if len(part) > 1 and part[1].value == ":":
+        if (len(part) > 2 and re.fullmatch(r"[A-Za-z_$][\w$]*", part[0].value)
+                and part[1].value == ":"):
             result.append((part[0].value, part[2:]))
         else:
             result.append((None, part))
     return result
+
+
+def bind_arguments(args, params, name):
+    """Bind Swift call arguments by external label, including skipped defaults."""
+    bound, cursor = {}, 0
+    for label, part in args:
+        if label is None:
+            index = cursor
+            if index < len(params) and params[index].get("label") != "_":
+                raise ValueError(f"missing argument label {params[index]['label']!r} in call to {name}")
+        else:
+            index = next((candidate for candidate in range(cursor, len(params))
+                          if params[candidate].get("label") == label), None)
+            if index is None:
+                expected = params[cursor].get("label") if cursor < len(params) else "no more arguments"
+                raise ValueError(f"unexpected argument label {label!r}; expected {expected!r}")
+            for skipped in range(cursor, index):
+                parameter = params[skipped]
+                if "default" not in parameter:
+                    raise ValueError(f"missing argument {parameter.get('label')!r} in call to {name}")
+                bound[parameter["name"]] = parameter["default"]
+        if index >= len(params):
+            raise ValueError(f"{name} received too many arguments")
+        parameter = params[index]
+        if index < cursor:
+            raise ValueError(f"arguments for {name} must follow declaration order")
+        bound[parameter["name"]] = part
+        cursor = index + 1
+    for index in range(cursor, len(params)):
+        parameter = params[index]
+        if "default" not in parameter:
+            raise ValueError(f"missing argument {parameter.get('label')!r} in call to {name}")
+        bound[parameter["name"]] = parameter["default"]
+    return bound
 
 
 def binding_target(expression):
@@ -154,11 +189,17 @@ class Expr:
 
     @classmethod
     def parse(cls, tokens, names):
+        tokens = list(tokens)
+        optional_try = False
+        while tokens and tokens[0].value in ("try", "await"):
+            marker = tokens.pop(0).value
+            if marker == "try" and tokens and tokens[0].value in ("?", "!"):
+                optional_try = tokens.pop(0).value == "?" or optional_try
         parser = cls(tokens, names)
         result = parser.expression()
         if parser.i != len(tokens):
             raise ValueError("unsupported expression: " + " ".join(values(tokens)))
-        return result
+        return {"op": "tryOptional", "a": result} if optional_try else result
 
     def take(self):
         if self.i >= len(self.tokens):
@@ -201,7 +242,12 @@ class Expr:
     def expression(self, minimum=0):
         t = self.take()
         v = t.value
-        if v in ("!", "-"):
+        if v == "&":
+            # Swift's inout marker is a call-site annotation. The translated
+            # values are objects/arrays for supported mutable helpers, so the
+            # same reference reaches the generated JavaScript helper.
+            left = self.expression(7)
+        elif v in ("!", "-"):
             left = {"op": "unary", "kind": v, "a": self.expression(7)}
         elif v == "." and self.i < len(self.tokens) and self.tokens[self.i].value == "init":
             self.i += 1
@@ -378,8 +424,16 @@ class Expr:
                 fields = []
                 for name, part in parts:
                     fields.append({"name": name, "value": Expr.parse(part, self.names)})
-                left = {"op": "construct", "type": left["name"], "fields": fields}
                 self.i = end + 1
+                closure_properties = self.names.get("__typeClosures", {}).get(left["name"], [])
+                if self.peek("{") and closure_properties:
+                    if len(closure_properties) != 1:
+                        raise ValueError(f"{left['name']} has multiple closure properties; label the trailing closure")
+                    closure_end = matching(self.tokens, self.i)
+                    closure = Expr.parse_closure(self.tokens[self.i:closure_end + 1], self.names)
+                    fields.append({"name": closure_properties[0], "value": closure})
+                    self.i = closure_end + 1
+                left = {"op": "construct", "type": left["name"], "fields": fields}
                 continue
             if op == "(" and left.get("op") in ("methodRef", "functionRef", "componentMethodRef", "firebaseRef"):
                 end = matching(self.tokens, self.i)
@@ -387,16 +441,8 @@ class Expr:
                 self.i = end + 1
                 if left.get("op") == "functionRef":
                     params = left.get("params", [])
-                    if len(args) > len(params) or any(index >= len(args) and "default" not in param for index, param in enumerate(params)):
-                        raise ValueError(f"{left['name']} expects {len(params)} argument(s)")
-                    call_args = {}
-                    for index, param in enumerate(params):
-                        if index < len(args):
-                            label, part = args[index]
-                            if label is not None and label != param["label"]:
-                                raise ValueError(f"unexpected argument label {label!r}; expected {param['label']!r}")
-                            call_args[param["name"]] = Expr.parse(part, self.names)
-                        else: call_args[param["name"]] = param["default"]
+                    call_args = {name: Expr.parse(part, self.names) if isinstance(part, list) else part
+                                 for name, part in bind_arguments(args, params, left["name"]).items()}
                     left = {"op": "globalCall", "name": left["name"], "args": call_args}
                 elif left.get("op") == "firebaseRef":
                     params = left.get("params", [])
@@ -412,16 +458,8 @@ class Expr:
                     left = {"op": "firebaseCall", "name": left["name"], "args": call_args}
                 elif left.get("op") == "componentMethodRef":
                     params = left.get("params", [])
-                    if len(args) > len(params) or any(index >= len(args) and "default" not in param for index, param in enumerate(params)):
-                        raise ValueError(f"{left['key']} expects {len(params)} argument(s)")
-                    call_args = {}
-                    for index, param in enumerate(params):
-                        if index < len(args):
-                            label, part = args[index]
-                            if label is not None and label != param["label"]:
-                                raise ValueError(f"unexpected argument label {label!r}; expected {param['label']!r}")
-                            call_args[param["name"]] = Expr.parse(part, self.names)
-                        else: call_args[param["name"]] = param["default"]
+                    call_args = {name: Expr.parse(part, self.names) if isinstance(part, list) else part
+                                 for name, part in bind_arguments(args, params, left["key"]).items()}
                     left = {"op": "componentCall", "key": left["key"], "args": call_args}
                 else:
                     call_args = [Expr.parse(part, self.names) for _, part in args]
@@ -480,6 +518,10 @@ class Expr:
                         self.i += 2
                         left = {"op": "calendar"}
                         continue
+                    if left.get("op") == "type":
+                        self.i += 2
+                        left = {"op": "enumCase", "type": left["name"], "name": member, "args": []}
+                        continue
                     self.i += 2
                     if member == "sorted" and self.peek("{"):
                         end = matching(self.tokens, self.i)
@@ -496,6 +538,12 @@ class Expr:
                             sorted_expr["a"] = left
                             self.i = end + 1
                             left = sorted_expr
+                            continue
+                        if member in ("min", "max") and len(args) == 1 and args[0][0] in ("by", "using"):
+                            sorted_expr = self.sorted_closure(args[0][1])
+                            left = {"op": "extremumBy", "kind": member, "a": left,
+                                    "compare": sorted_expr.get("compare"), "params": sorted_expr.get("params")}
+                            self.i = end + 1
                             continue
                         if member == "reduce":
                             named = {label: part for label, part in args if label is not None}
@@ -524,7 +572,18 @@ class Expr:
                         call_args = [Expr.parse(part, self.names) for _, part in args]
                         self.i = end + 1
                         left = {"op": "call", "name": member, "a": left, "args": call_args}
-                    elif member in ("map", "mapValues", "compactMap", "filter") and self.peek("{"):
+                    elif member == "removeAll" and self.peek("{"):
+                        end = matching(self.tokens, self.i)
+                        closure = Expr.parse_closure(self.tokens[self.i:end + 1], self.names)
+                        self.i = end + 1
+                        left = {"op": "call", "name": member, "a": left, "args": [closure]}
+                    elif member in ("min", "max") and self.peek("{"):
+                        end = matching(self.tokens, self.i)
+                        sorted_expr = self.sorted_closure(self.tokens[self.i:end + 1])
+                        left = {"op": "extremumBy", "kind": member, "a": left,
+                                "compare": sorted_expr.get("compare"), "params": sorted_expr.get("params")}
+                        self.i = end + 1
+                    elif member in ("map", "mapValues", "compactMap", "flatMap", "filter") and self.peek("{"):
                         end = matching(self.tokens, self.i)
                         closure = Expr.parse_closure(self.tokens[self.i:end + 1], self.names)
                         self.i = end + 1
@@ -536,7 +595,7 @@ class Expr:
                     else:
                         left = {"op": "member", "name": member, "a": left}
                     continue
-            if op == "(" and left.get("op") in ("member", "local", "state", "binding"):
+            if op == "(" and left.get("op") in ("member", "local", "state", "binding", "closure"):
                 end = matching(self.tokens, self.i)
                 args = arguments(self.tokens[self.i + 1:end])
                 if any(label is not None for label, _ in args):
@@ -545,9 +604,24 @@ class Expr:
                         "args": [Expr.parse(part, self.names) for _, part in args]}
                 self.i = end + 1
                 continue
+            if op == "(" and left.get("op") == "dismissRef":
+                end = matching(self.tokens, self.i)
+                if end != self.i + 1:
+                    raise ValueError("dismiss() takes no arguments")
+                left = {"op": "dismissCall"}
+                self.i = end + 1
+                continue
             if op == "!":
                 self.i += 1
                 left = {"op": "unwrap", "a": left}
+                continue
+            if op == "as" and self.i + 2 < len(self.tokens) and self.tokens[self.i + 1].value in ("?", "!"):
+                cast_kind = self.tokens[self.i + 1].value
+                type_token = self.tokens[self.i + 2]
+                if not re.fullmatch(r"[A-Z][A-Za-z0-9_]*", type_token.value):
+                    raise ValueError("casts require a named Swift type")
+                self.i += 3
+                left = {"op": "cast", "kind": cast_kind, "type": type_token.value, "a": left}
                 continue
             priority = self.precedence.get(op, -1)
             if priority < minimum:
@@ -677,25 +751,32 @@ class ClosureStatements:
         token = self.ts[self.i]
         if token.value == "guard":
             self.i += 1
-            if self.i >= len(self.ts) or self.ts[self.i].value not in ("let", "var"):
-                raise ValueError("only guard let/var is supported in closures")
-            self.i += 1
+            start = self.i
+            while self.i < len(self.ts) and self.ts[self.i].value != "else":
+                if self.ts[self.i].value in ("(", "[", "{"):
+                    self.i = matching(self.ts, self.i) + 1
+                else:
+                    self.i += 1
             if self.i >= len(self.ts):
-                raise ValueError("guard binding needs a name")
-            name = self.ts[self.i].value
-            self.i += 1
-            while self.i < len(self.ts) and self.ts[self.i].value not in ("=", "else"):
-                self.i += 1
-            if self.i >= len(self.ts) or self.ts[self.i].value != "=":
-                raise ValueError("guard binding needs an initializer")
-            self.i += 1
-            value = self.expression_until_line(("else",))
-            if self.i >= len(self.ts) or self.ts[self.i].value != "else":
-                raise ValueError("guard let must include else")
+                raise ValueError("guard must include an else block")
+            bindings, tests = [], []
+            for part in split_top(self.ts[start:self.i]):
+                if part and part[0].value in ("let", "var"):
+                    if len(part) < 2:
+                        raise ValueError("guard binding needs a name")
+                    name = part[1].value
+                    equal = next((index for index, item in enumerate(part) if item.value == "="), None)
+                    expression = Expr.parse(part[equal + 1:], self.names) if equal is not None else Expr.parse([part[1]], self.names)
+                    bindings.append({"name": name, "value": expression})
+                    self.names[name] = {"op": "local", "key": name}
+                elif part:
+                    tests.append(Expr.parse(part, self.names))
             self.i += 1
             else_body = self.block()
-            self.names[name] = {"op": "local", "key": name}
-            return {"kind": "guardLet", "name": name, "value": value, "else": else_body}
+            test = {"op": "literal", "value": True}
+            for expression in tests:
+                test = expression if test.get("value") is True else {"op": "binary", "kind": "&&", "a": test, "b": expression}
+            return {"kind": "guard", "bindings": bindings, "test": test, "else": else_body}
         if token.value == "if":
             self.i += 1
             start = self.i

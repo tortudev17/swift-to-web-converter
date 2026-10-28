@@ -8,7 +8,7 @@ import mimetypes
 import re
 from urllib.parse import urlsplit
 import xml.etree.ElementTree as ET
-from .syntax import ConversionError, Expr, Token, arguments, lex, matching, split_top, values
+from .syntax import ConversionError, Expr, Token, arguments, bind_arguments, lex, matching, split_top, values
 
 SYSTEM_SYMBOLS = {
     "gear": '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="8.2"/><circle cx="12" cy="12" r="3.3"/><path d="M12 2.4v1.4M12 20.2v1.4M2.4 12h1.4M20.2 12h1.4M5.22 5.22l1 1M17.78 17.78l1 1M18.78 5.22l-1 1M6.22 17.78l-1 1"/></svg>',
@@ -74,30 +74,42 @@ class MethodParser:
 
     def expression_until_line(self):
         start = self.i
+        continuation = {".", "?", "??", "+", "-", "*", "/", "%", "==", "!=", "<", ">",
+                        "<=", ">=", "&&", "||", "...", "..<", ":", ",", "="}
         while self.i < len(self.ts):
             if self.ts[self.i].value == ";":
                 break
             if (self.i > start and self.ts[self.i].line > self.ts[self.i - 1].line
-                    and self.ts[self.i].value not in (".", "?", "+", "??")):
+                    and self.ts[self.i].value not in continuation
+                    and self.ts[self.i - 1].value not in continuation):
                 break
             if self.ts[self.i].value in ("(", "[", "{"):
                 self.i = matching(self.ts, self.i) + 1
             else:
                 self.i += 1
         result = self.ts[start:self.i]
-        while result and result[0].value in ("try", "await"):
-            result = result[1:]
-            if result and result[0].value in ("?", "!"):
-                result = result[1:]
         if self.i < len(self.ts) and self.ts[self.i].value == ";":
             self.i += 1
         if not result:
             raise ValueError("expected a statement expression")
-        return Expr.parse(result, self.names)
+        return self.expression(result)
 
     def parse_block(self, body, names=None):
         parser = MethodParser(body, names=self.names if names is None else names)
         return parser.parse()
+
+    @staticmethod
+    def strip_effect_markers(tokens):
+        """Drop Swift's non-semantic try/await prefixes before parsing an expression."""
+        result = list(tokens)
+        while result and result[0].value in ("try", "await"):
+            marker = result.pop(0).value
+            if marker == "try" and result and result[0].value in ("?", "!"):
+                result.pop(0)
+        return result
+
+    def expression(self, tokens, names=None):
+        return Expr.parse(tokens, self.names if names is None else names)
 
     def parse_if(self):
         self.i += 1
@@ -117,11 +129,11 @@ class MethodParser:
             if part and part[0].value in ("let", "var"):
                 name = part[1].value if len(part) > 1 else ""
                 eq = next((index for index, item in enumerate(part) if item.value == "="), None)
-                expression = Expr.parse(part[eq + 1:], yes_names) if eq is not None else Expr.parse([part[1]], yes_names)
+                expression = self.expression(part[eq + 1:], yes_names) if eq is not None else self.expression([part[1]], yes_names)
                 bindings.append({"name": name, "value": expression})
                 yes_names[name] = {"op": "local", "key": name}
             elif part:
-                conditions.append(Expr.parse(part, yes_names))
+                conditions.append(self.expression(part, yes_names))
         test = {"op": "literal", "value": True}
         for expression in conditions:
             test = expression if test.get("value") is True else {"op": "binary", "kind": "&&", "a": test, "b": expression}
@@ -148,7 +160,7 @@ class MethodParser:
                 self.i += 1
         if self.i >= len(self.ts):
             raise ValueError("switch statement has no body")
-        expression = Expr.parse(self.ts[start:self.i], self.names)
+        expression = self.expression(self.ts[start:self.i])
         ending = matching(self.ts, self.i)
         body = self.ts[self.i + 1:ending]
         case_starts, index = [], 0
@@ -169,7 +181,7 @@ class MethodParser:
             patterns = [] if is_default else split_top(body[case_start + 1:colon])
             if any(not pattern or pattern[0].value in ("let", "var") for pattern in patterns):
                 raise ValueError("switch case binding patterns are unsupported in methods")
-            values_for_case = [Expr.parse(pattern, self.names) for pattern in patterns]
+            values_for_case = [self.expression(pattern) for pattern in patterns]
             branch = self.parse_block(body[colon + 1:limit])
             cases.append({"default": is_default, "values": values_for_case, "body": branch})
         self.i = ending + 1
@@ -190,8 +202,8 @@ class MethodParser:
                     raise ValueError("writeFirebase requires path: and data:")
                 self.i = end + 1
                 if self.i < len(self.ts) and self.ts[self.i].value == ";": self.i += 1
-                return {"kind": "firebaseWrite", "path": Expr.parse(args["path"], self.names),
-                        "value": Expr.parse(args["data"], self.names)}
+                return {"kind": "firebaseWrite", "path": self.expression(args["path"]),
+                        "value": self.expression(args["data"])}
             return self.statement()
         if token.value == "throw":
             self.i += 1
@@ -216,7 +228,7 @@ class MethodParser:
                 catch_names[catch_name] = {"op": "local", "key": catch_name}
                 where = next((index for index, item in enumerate(header) if item.value == "where"), None)
                 if where is not None:
-                    catch_test = Expr.parse(header[where + 1:], catch_names)
+                    catch_test = self.expression(header[where + 1:], catch_names)
                 catcher = self.parse_block(self.block(), catch_names)
                 self.names = outer
             return {"kind": "doCatch", "body": body, "catchName": catch_name,
@@ -246,13 +258,13 @@ class MethodParser:
                     name = part[1].value if len(part) > 1 else ""
                     eq = next((index for index, value in enumerate(part) if value.value == "="), None)
                     if eq is None:
-                        expression = Expr.parse([part[1]], success_names)
+                        expression = self.expression([part[1]], success_names)
                     else:
-                        expression = Expr.parse(part[eq + 1:], success_names)
+                        expression = self.expression(part[eq + 1:], success_names)
                     bindings.append({"name": name, "value": expression})
                     success_names[name] = {"op": "local", "key": name}
                 elif part:
-                    tests.append(Expr.parse(part, success_names))
+                    tests.append(self.expression(part, success_names))
             test = {"op": "literal", "value": True}
             for expression in tests:
                 test = expression if test.get("value") is True else {"op": "binary", "kind": "&&", "a": test, "b": expression}
@@ -309,7 +321,7 @@ class MethodParser:
                     self.i += 1
             if self.i >= len(self.ts):
                 raise ValueError("for loop has no body")
-            collection = Expr.parse(self.ts[start:self.i], self.names)
+            collection = self.expression(self.ts[start:self.i])
             body_names = dict(self.names)
             # Keep tuple loop bindings available to the body.
             pattern_names = [item[0].value for item in split_top(pattern[1:-1]) if item] if pattern and pattern[0].value == "(" else [name]
@@ -339,10 +351,15 @@ class MethodParser:
             else:
                 cursor += 1
         if assignment is not None:
-            lhs = Expr.parse(self.ts[self.i:assignment], self.names)
+            lhs_tokens = self.ts[self.i:assignment]
             operator = self.ts[assignment].value
             self.i = assignment + 1
             next_value = self.expression_until_line()
+            if values(lhs_tokens) == ["_"] and operator == "=":
+                # Swift commonly discards a Firebase response while awaiting a
+                # write: `_ = try await firebaseRequest(...)`.
+                return {"kind": "expression", "value": next_value}
+            lhs = self.expression(lhs_tokens)
             target = Compiler.binding_reference(lhs)
             if target:
                 return {"kind": "stateAssign", "binding": {"op": "binding", **target},
@@ -379,8 +396,10 @@ class Compiler:
         self.model_types = set()
         self.model_methods = {}
         self.model_field_types = {}
+        self.model_closure_properties = {}
         self.model_defaults = {}
         self.global_functions = {}
+        self.global_signatures = {}
         self.computed_properties = {}
         self.component_methods = {}
         self.enums = {}
@@ -393,9 +412,40 @@ class Compiler:
         self.needs_asset_lookup = False
         for note in project.notes:
             self.report(Token("project", str(project.root), 1), note)
+        self.collect_global_signatures()
         for path in project.sources:
             self.read(path)
         self.load_assets()
+
+    def collect_global_signatures(self):
+        """Make top-level helper signatures available before parsing any bodies."""
+        for path in self.project.sources:
+            tokens = lex(path.read_text(encoding="utf-8"), str(path))
+            depth, index = 0, 0
+            while index < len(tokens):
+                token = tokens[index]
+                if token.value == "func" and depth == 0 and index + 1 < len(tokens):
+                    end = self.function_end(tokens, index)
+                    if end is None:
+                        index += 1
+                        continue
+                    name = tokens[index + 1].value
+                    try:
+                        signature = self.function_signature(tokens, index, end)
+                        self.global_signatures.setdefault(name, signature["params"])
+                    except (ValueError, IndexError):
+                        pass
+                    index = end + 1
+                    continue
+                if token.value in ("{", "(", "["):
+                    index = matching(tokens, index) + 1 if token.value != "{" else index + 1
+                    if token.value == "{":
+                        depth += 1
+                elif token.value in ("}",):
+                    depth = max(0, depth - 1)
+                    index += 1
+                else:
+                    index += 1
 
     def report(self, token, message):
         try:
@@ -472,7 +522,15 @@ class Compiler:
                 except (ValueError, IndexError) as e:
                     body_tokens = tokens[i:end + 1] if end is not None else []
                     body_values = values(body_tokens)
-                    if (name == "schoolDateLabel" and "DateFormatter" in body_values
+                    if (name == "schoolDayKey" and "SchoolCalendarMadrid" in body_values
+                            and "key" in body_values and "matchDate" in body_values):
+                        try:
+                            signature = self.function_signature(tokens, i, end)
+                            self.global_functions[name] = {"params": signature["params"],
+                                                           "builtin": "spanishSchoolDayKey"}
+                        except (ValueError, IndexError):
+                            self.report(t, f"Global Swift function {name} is not translated or executed: {e}")
+                    elif (name == "schoolDateLabel" and "DateFormatter" in body_values
                             and "dateFormat" in body_values and "capitalized" in body_values):
                         try:
                             signature = self.function_signature(tokens, i, end)
@@ -554,7 +612,19 @@ class Compiler:
             raise ValueError("missing parameter list")
         params_end = matching(tokens, paren)
         params = []
-        names = {}
+        names = {
+            builtin_name: {"op": "firebaseRef", "name": builtin_name, "params": builtin_params}
+            for builtin_name, builtin_params in FIREBASE_BUILTINS.items()
+        }
+        names["__typeClosures"] = self.model_closure_properties
+        names.update({
+            function_name: {"op": "functionRef", "name": function_name, "params": function["params"]}
+            for function_name, function in self.global_functions.items()
+        })
+        names.update({
+            function_name: {"op": "functionRef", "name": function_name, "params": signature}
+            for function_name, signature in self.global_signatures.items()
+        })
         for part in split_top(tokens[paren + 1:params_end]):
             colon = next((index for index, token in enumerate(part) if token.value == ":"), None)
             if colon is None:
@@ -632,6 +702,8 @@ class Compiler:
                             break
                         type_end += 1
                     type_tokens = values(tokens[type_start:type_end])
+                    if "->" in type_tokens and "(" in type_tokens:
+                        self.model_closure_properties.setdefault(name, []).append(field)
                     if len(type_tokens) == 3 and type_tokens[0] == "[" and type_tokens[2] == "]":
                         self.model_field_types.setdefault(name, {})[field] = {"array": type_tokens[1], "optional": "?" in type_tokens}
                     elif type_tokens and type_tokens[0] not in ("(", "{"):
@@ -796,7 +868,14 @@ class Compiler:
                 label, local_name = declaration
             else:
                 raise ValueError("unsupported parameter declaration")
-            params.append({"label": label, "name": local_name})
+            parameter = {"label": label, "name": local_name}
+            equal = next((index for index in range(colon + 1, len(part)) if part[index].value == "="), None)
+            if equal is not None:
+                try:
+                    parameter["default"] = Expr.parse(part[equal + 1:], {})
+                except (ValueError, IndexError) as e:
+                    raise ValueError(f"default value for {local_name} is unsupported: {e}") from None
+            params.append(parameter)
         body_start = params_end + 1
         while body_start < len(tokens) and tokens[body_start].value != "{":
             body_start += 1
@@ -1123,6 +1202,7 @@ class Compiler:
         }, []
         names.update({name: {"op": "firebaseRef", "name": name, "params": params}
                       for name, params in FIREBASE_BUILTINS.items()})
+        names["__typeClosures"] = self.model_closure_properties
         supplied = dict(args)
         expected = {p[0] for p in declaration.properties if p[1] != "State"}
         for name, _ in args:
@@ -1167,6 +1247,8 @@ class Compiler:
                                    if not reference["path"] else {"op": "binding", **reference})
                     names[name] = binding
                 names["$" + name] = names[name]
+            elif attribute == "Environment" and name == "dismiss":
+                names[name] = {"op": "dismissRef"}
             elif attribute:
                 self.report(token, f"@{attribute} {name} is unsupported")
                 names[name] = {"op": "literal", "value": None}
@@ -1220,8 +1302,8 @@ class Compiler:
             firebase_index = next((index for index, token in enumerate(part[:-1])
                                    if token.value == "writeFirebase" and part[index + 1].value == "("), None)
             if firebase_index is not None:
-                if not (self.firebase_base_url and self.firebase_write_helper):
-                    self.report(part[firebase_index], "writeFirebase action needs a literal Firebase databaseURL and the local REST helper")
+                if not self.firebase_base_url:
+                    self.report(part[firebase_index], "writeFirebase action needs a literal Firebase databaseURL")
                     continue
                 try:
                     end = matching(part, firebase_index + 1)
@@ -1246,8 +1328,8 @@ class Compiler:
                     if function_name not in self.global_functions:
                         raise ValueError(f"global function {function_name} is not available")
                     calls_firebase = self.function_calls_firebase_write(function_name)
-                    if calls_firebase and not (self.firebase_base_url and self.firebase_write_helper):
-                        raise ValueError("Firebase-writing helper needs a literal databaseURL and local writeFirebase helper")
+                    if calls_firebase and not self.firebase_base_url:
+                        raise ValueError("Firebase-writing helper needs a literal databaseURL")
                     result.append({"kind": "functionCall", "name": function_name, "args": expression["args"]})
                     self.firebase_write_action = self.firebase_write_action or calls_firebase
                     continue
@@ -1273,12 +1355,33 @@ class Compiler:
                 continue
             if names.get(part[0].value, {}).get("op") == "closure":
                 try:
-                    if len(part) < 3 or part[1].value != "(" or matching(part, 1) != len(part) - 1:
-                        raise ValueError("callback needs a direct argument list")
-                    callback_args = [Expr.parse(arg, names) for label, arg in arguments(part[2:-1]) if label is None]
-                    result.append({"kind": "closureCall", "name": part[0].value, "args": callback_args})
+                    if len(part) == 1:
+                        callback_args = []
+                    else:
+                        if part[1].value != "(" or matching(part, 1) != len(part) - 1:
+                            raise ValueError("callback needs a direct argument list")
+                        callback_args = [Expr.parse(arg, names) for label, arg in arguments(part[2:-1]) if label is None]
+                    result.append({"kind": "closureCall", "name": part[0].value,
+                                   "closure": names[part[0].value], "args": callback_args})
                 except (ValueError, IndexError) as e:
                     self.report(part[0], f"Unsupported callback action: {e}")
+                continue
+            if part[0].value in ("if", "guard", "switch", "for"):
+                try:
+                    statements = MethodParser(part, names=names).parse()
+                    def global_calls(value):
+                        if isinstance(value, dict):
+                            found = [value["name"]] if value.get("op") == "globalCall" else []
+                            for child in value.values(): found.extend(global_calls(child))
+                            return found
+                        if isinstance(value, list):
+                            return [name for child in value for name in global_calls(child)]
+                        return []
+                    self.firebase_write_action = self.firebase_write_action or self.has_firebase_write(statements) or any(
+                        self.function_calls_firebase_write(name) for name in global_calls(statements))
+                    result.append({"kind": "program", "statements": statements})
+                except (ValueError, IndexError) as e:
+                    self.report(part[0], "Unsupported conditional action: " + str(e))
                 continue
             name = part[0].value
             state = names.get(name, {})
@@ -1319,6 +1422,15 @@ class Compiler:
             if isinstance(value, dict):
                 if value.get("kind") == "firebaseWrite":
                     return True
+                if value.get("op") == "firebaseCall":
+                    firebase_name = value.get("name")
+                    if firebase_name in {"updateFirebase", "createFirebase", "patchFirebaseRoot", "writeFirebase"}:
+                        return True
+                    if firebase_name == "firebaseRequest":
+                        method = value.get("args", {}).get("method", {})
+                        method = method.get("value") if isinstance(method, dict) else None
+                        if method and str(method).upper() != "GET":
+                            return True
                 if value.get("op") == "globalCall" and self.function_calls_firebase_write(value.get("name", ""), visited):
                     return True
                 return any(contains(child) for child in value.values())
@@ -1557,7 +1669,7 @@ class ViewParser:
         recognized = {
             "Text": {None}, "Image": {None, "systemName"}, "VStack": {"alignment", "spacing"},
             "HStack": {"alignment", "spacing"}, "ZStack": {"alignment"}, "ScrollView": {None, "showsIndicators"},
-            "Button": {None, "action", "label", "role"}, "TextField": {None, "text"}, "SecureField": {None, "text"},
+            "Button": {None, "action", "label", "role"}, "TextField": {None, "text"}, "SecureField": {None, "text"}, "TextEditor": {"text"},
             "Toggle": {None, "isOn"}, "NavigationLink": {None, "destination", "label"},
             "List": {None, "rowContent"},
             "ForEach": {None, "id"}, "Spacer": {"minLength"}, "Divider": set(),
@@ -1729,7 +1841,7 @@ class ViewParser:
             node = {"type": "Button", "actions": actions, "children": children}
             if "role" in argmap:
                 node["role"] = "destructive" if values(argmap["role"]) == [".", "destructive"] else text(argmap["role"])
-        elif name in ("TextField", "SecureField", "Toggle"):
+        elif name in ("TextField", "SecureField", "TextEditor", "Toggle"):
             binding = argmap.get("isOn" if name == "Toggle" else "text", [])
             reference, _ = self.presentation_binding(binding)
             if not reference:

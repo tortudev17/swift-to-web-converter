@@ -180,9 +180,9 @@
     return executeAsyncStatements(fn.body, ctx, locals, selfValue);
   }
   async function invokeClosureAsync(closure, args, ctx, locals, selfValue) {
-    const scope = Object.assign(Object.create(null), locals);
+    const scope = Object.assign(Object.create(null), closure.captures || {}, locals);
     (closure.params || []).forEach((name, index) => { scope[name] = args[index]; });
-    const result = await executeAsyncStatements(closure.body, ctx, scope, selfValue);
+    const result = await executeAsyncStatements(closure.body, closure.context ?? ctx, scope, closure.selfValue ?? selfValue);
     return result.value;
   }
   async function callFirebaseBuiltin(name, args) {
@@ -203,6 +203,14 @@
   }
   async function asyncValue(e, ctx, locals, selfValue = null) {
     if (!e || typeof e !== 'object') return e;
+    if (e.op === 'dismissCall') {
+      locals.__swiftwebDismiss?.();
+      return null;
+    }
+    if (e.op === 'tryOptional') {
+      try { return await asyncValue(e.a, ctx, locals, selfValue); }
+      catch { return null; }
+    }
     if (e.op === 'firebaseCall') {
       const args = Object.create(null);
       for (const [name, expression] of Object.entries(e.args || {})) {
@@ -331,8 +339,13 @@
           if (result.returned || result.break) return result;
         } catch (error) {
           locals[statement.catchName || 'error'] = error;
-          const result = await executeAsyncStatements(statement.catch, ctx, locals, selfValue);
-          delete locals[statement.catchName || 'error'];
+          let result;
+          try {
+            if (statement.catchTest && !await asyncValue(statement.catchTest, ctx, locals, selfValue)) throw error;
+            result = await executeAsyncStatements(statement.catch, ctx, locals, selfValue);
+          } finally {
+            delete locals[statement.catchName || 'error'];
+          }
           if (result.returned || result.break) return result;
         }
       } else if (statement.kind === 'task') {
@@ -342,6 +355,9 @@
         const error = await asyncValue(statement.value, ctx, locals, selfValue);
         const thrown = new Error(error?.message || error?.rawValue || error?.__enumCase || String(error ?? 'Swift operation failed'));
         thrown.statusCode = error?.statusCode;
+        thrown.swiftType = error?.swiftType || error?.__type || null;
+        thrown.__enumCase = error?.__enumCase || null;
+        thrown.rawValue = error?.rawValue;
         throw thrown;
       } else if (statement.kind === 'break') {
         return {returned: false, break: true, value: undefined};
@@ -361,15 +377,16 @@
     }
   }
   function invokeClosure(closure, args, ctx, locals, selfValue) {
-    const scope = Object.assign(Object.create(null), locals);
+    const scope = Object.assign(Object.create(null), closure.captures || {}, locals);
     (closure.params || []).forEach((name, index) => { scope[name] = args[index]; });
-    return executeStatements(closure.body, ctx, scope, selfValue).value;
+    return executeStatements(closure.body, closure.context ?? ctx, scope, closure.selfValue ?? selfValue).value;
   }
   function value(e, ctx, locals, selfValue = null) {
     if (e == null) return null;
     if (typeof e !== 'object') return e;
     switch (e.op) {
       case 'literal': return e.value;
+      case 'tryOptional': return value(e.a, ctx, locals, selfValue);
       case 'state': return state.get(stateKey(ctx, e.key));
       case 'binding': return readBinding(e, ctx, locals);
       case 'local': return locals[e.key];
@@ -380,11 +397,11 @@
         if (e.name === 'orderedAscending') return -1;
         if (e.name === 'orderedSame') return 0;
         if (e.name === 'orderedDescending') return 1;
-        return {__enumCase: e.name, rawValue: model.enumCaseRawValues?.[e.name] ?? e.name,
+        return {__type: e.type, __enumCase: e.name, rawValue: model.enumCaseRawValues?.[e.name] ?? e.name,
           associated: (e.args || []).map(item => value(item, ctx, locals, selfValue))};
       }
       case 'calendar': return {__type: 'Calendar'};
-      case 'closure': return e;
+      case 'closure': return {...e, captures: {...locals}, context: ctx, selfValue};
       case 'tuple': return e.items.map(x => value(x, ctx, locals, selfValue));
       case 'date': return new Date((Number(value(e.seconds, ctx, locals, selfValue)) + 978307200) * 1000);
       case 'date1970': return new Date(Number(value(e.seconds, ctx, locals, selfValue)) * 1000);
@@ -436,6 +453,9 @@
         if (target instanceof Date && e.name === 'timeIntervalSince1970') return target.getTime() / 1000;
         if (target?.__type === 'UUID' && e.name === 'uuidString') return target.uuidString;
         if (target instanceof Error && ['localizedDescription', 'errorDescription', 'message'].includes(e.name)) return target.message;
+        if (target?.__enumCase && ['localizedDescription', 'errorDescription'].includes(e.name)) {
+          return target.localizedDescription ?? target.errorDescription ?? target.rawValue ?? target.__enumCase;
+        }
         if (target != null && ['stringValue', 'intValue', 'doubleValue', 'boolValue', 'arrayValue', 'objectValue'].includes(e.name)) {
           if (e.name === 'stringValue') return typeof target === 'string' ? target : null;
           if (e.name === 'intValue') return Number.isFinite(Number(target)) ? Math.trunc(Number(target)) : null;
@@ -485,6 +505,12 @@
             if (e.a?.op === 'state') changedStateKeys.add(stateKey(ctx, e.a.key));
             return null;
           }
+          if (e.name === 'removeAll' && args[0]?.op === 'closure') {
+            const kept = receiver.filter(item => !invokeClosure(args[0], [item], ctx, locals, selfValue));
+            receiver.splice(0, receiver.length, ...kept);
+            if (e.a?.op === 'state') changedStateKeys.add(stateKey(ctx, e.a.key));
+            return null;
+          }
           if (e.name === 'contains' && args.length === 1) return receiver.includes(args[0]);
           if (e.name === 'sorted' && !args.length) return receiver.slice().sort((a, b) =>
             typeof a === 'string' && typeof b === 'string' ? a.localeCompare(b, 'es') : Number(a) - Number(b));
@@ -494,13 +520,25 @@
           if (e.name === 'mapValues' && args[0]?.op === 'closure') return Object.fromEntries(
             Object.entries(receiver).map(([key, item]) => [key, invokeClosure(args[0], [item], ctx, locals, selfValue)]));
           if (e.name === 'compactMap' && args[0]?.op === 'closure') return receiver.map(item => invokeClosure(args[0], [item], ctx, locals, selfValue)).filter(item => item != null);
+          if (e.name === 'flatMap' && args[0]?.op === 'closure') return receiver.flatMap(item => {
+            const result = invokeClosure(args[0], [item], ctx, locals, selfValue);
+            return Array.isArray(result) ? result : result == null ? [] : [result];
+          });
           if (e.name === 'filter' && args[0]?.op === 'closure') return receiver.filter(item => Boolean(invokeClosure(args[0], [item], ctx, locals, selfValue)));
           if (e.name === 'first' && args[0]?.op === 'closure') return receiver.find(item => Boolean(invokeClosure(args[0], [item], ctx, locals, selfValue))) ?? null;
           if (e.name === 'joined') return receiver.map(item => String(item ?? '')).join(String(args[0] ?? ''));
         }
         if (receiver && !Array.isArray(receiver) && typeof receiver === 'object') {
-          if (e.name === 'map' && e.args?.[0]?.op === 'closure') return Object.entries(receiver).map(([key, item]) => invokeClosure(e.args[0], [{key, value: item}], ctx, locals, selfValue));
-          if (e.name === 'filter' && e.args?.[0]?.op === 'closure') return Object.entries(receiver).filter(([key, item]) => invokeClosure(e.args[0], [{key, value: item}], ctx, locals, selfValue)).map(([key, item]) => ({key, value: item}));
+          const applyEntry = (closure, key, item) => closure.params?.length > 1
+            ? invokeClosure(closure, [key, item], ctx, locals, selfValue)
+            : invokeClosure(closure, [{key, value: item}], ctx, locals, selfValue);
+          if (e.name === 'map' && args[0]?.op === 'closure') return Object.entries(receiver).map(([key, item]) => applyEntry(args[0], key, item));
+          if (e.name === 'compactMap' && args[0]?.op === 'closure') return Object.entries(receiver).map(([key, item]) => applyEntry(args[0], key, item)).filter(item => item != null);
+          if (e.name === 'flatMap' && args[0]?.op === 'closure') return Object.entries(receiver).flatMap(([key, item]) => {
+            const result = applyEntry(args[0], key, item);
+            return Array.isArray(result) ? result : result == null ? [] : [result];
+          });
+          if (e.name === 'filter' && args[0]?.op === 'closure') return Object.entries(receiver).filter(([key, item]) => applyEntry(args[0], key, item)).map(([key, item]) => ({key, value: item}));
           if (e.name === 'contains' && args.length === 1) return Object.hasOwn(receiver, String(args[0]));
         }
         if (typeof receiver === 'string' && e.name === 'localizedCaseInsensitiveCompare' && args.length === 1) {
@@ -550,6 +588,15 @@
           }).format(date);
           return label.charAt(0).toLocaleUpperCase('es-ES') + label.slice(1);
         }
+        if (fn.builtin === 'spanishSchoolDayKey') {
+          const date = parameters.matchDate instanceof Date ? parameters.matchDate : new Date(parameters.matchDate);
+          if (Number.isNaN(date.valueOf())) return '';
+          const parts = new Intl.DateTimeFormat('en-GB', {
+            year: 'numeric', month: '2-digit', day: '2-digit', timeZone: 'Europe/Madrid',
+          }).formatToParts(date);
+          const fields = Object.fromEntries(parts.map(item => [item.type, item.value]));
+          return `${fields.year}-${fields.month}-${fields.day}`;
+        }
         return executeStatements(fn.body, ctx, parameters, null).value;
       }
       case 'componentCall': {
@@ -576,6 +623,16 @@
           return reverse ? 1 : 0;
         });
       }
+      case 'extremumBy': {
+        const items = value(e.a, ctx, locals, selfValue);
+        if (!Array.isArray(items) || !items.length) return null;
+        const [firstName, secondName] = e.params || ['$0', '$1'];
+        return items.reduce((best, candidate) => {
+          const scope = {...locals, [firstName]: candidate, [secondName]: best};
+          const candidateFirst = Boolean(value(e.compare, ctx, scope, selfValue));
+          return e.kind === 'min' ? (candidateFirst ? candidate : best) : (candidateFirst ? best : candidate);
+        });
+      }
       case 'prefix': {
         const a = value(e.a, ctx, locals, selfValue);
         const count = Math.max(0, Math.trunc(Number(value(e.count, ctx, locals, selfValue))) || 0);
@@ -592,6 +649,13 @@
         return null;
       }
       case 'unwrap': return value(e.a, ctx, locals, selfValue) ?? null;
+      case 'cast': {
+        const target = value(e.a, ctx, locals, selfValue);
+        if (target == null) return null;
+        if (target.swiftType === e.type || target.__type === e.type) return target;
+        if (e.type === 'FirebaseHTTPError' && typeof target.statusCode === 'number') return target;
+        return null;
+      }
       case 'unary': return e.kind === '!' ? !value(e.a, ctx, locals, selfValue) : -value(e.a, ctx, locals, selfValue);
       case 'binary': {
         const a = value(e.a, ctx, locals, selfValue);
@@ -624,6 +688,10 @@
   }
   async function actions(list, ctx, locals) {
     for (const a of list) {
+      if (a.kind === 'program') {
+        await executeAsyncStatements(a.statements, ctx, locals);
+        continue;
+      }
       if (a.kind === 'functionCall') {
         try {
           await executeActionFunction(a.name, a.args, ctx, locals);
@@ -641,7 +709,7 @@
         continue;
       }
       if (a.kind === 'closureCall') {
-        const callback = locals[a.name];
+        const callback = a.closure ? value(a.closure, ctx, locals) : locals[a.name];
         if (callback?.op === 'closure') {
           const args = (a.args || []).map(expression => value(expression, ctx, locals));
           await invokeClosureAsync(callback, args, ctx, locals, null);
@@ -1003,6 +1071,14 @@
         el.addEventListener('input', () => { writeBinding(n.binding, el.value, ctx, locals); persistState(); render(); });
         break;
       }
+      case 'TextEditor': {
+        el = element('textarea', 'text-editor');
+        el.setAttribute('aria-label', 'Text');
+        el.value = String(ev(n.binding) ?? '');
+        el.dataset.focus = JSON.stringify(bindingReference(n.binding));
+        el.addEventListener('input', () => { writeBinding(n.binding, el.value, ctx, locals); persistState(); render(); });
+        break;
+      }
       case 'DatePicker': {
         el = element('label', 'date-picker-control');
         const title = element('span', 'picker-label');
@@ -1272,6 +1348,7 @@
             panel.appendChild(close);
             if (m.name === 'sheet') {
               const scope = Object.assign(Object.create(null), locals);
+              scope.__swiftwebDismiss = dismiss;
               if (m.param) scope[m.param] = presentedValue;
               children(panel, m.content, ctx, scope);
             } else {
@@ -1397,6 +1474,7 @@
       const error = new Error(typeof data === 'string' ? data : data?.error || `HTTP ${response.status}`);
       error.statusCode = response.status;
       error.path = path;
+      error.swiftType = 'FirebaseHTTPError';
       throw error;
     }
     return {data, etag: response.headers.get('ETag'), status: response.status};
